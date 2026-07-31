@@ -1,0 +1,8 @@
+node_modules
+dist
+.cache
+public/assets/blocks/
+public/assets/atlas.png
+public/assets/atlas.json
+*.jar
+.DS_Store
