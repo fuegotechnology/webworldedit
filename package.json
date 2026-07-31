@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "assets": "node scripts/fetch-assets.mjs",
     "assets:list": "node scripts/fetch-assets.mjs --list",
-    "test": "vite-node tests/run.ts"
+    "test": "vite-node tests/run.ts",
+    "test:render": "vite-node tests/render.ts",
+    "test:all": "npm run test && npm run test:render"
   },
   "dependencies": {
     "three": "^0.169.0"
