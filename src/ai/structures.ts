@@ -395,6 +395,40 @@ export function buildHouse(
 
 // -------------------------------------------------------------------- bridge
 
+/**
+ * Ground-plane geometry for anything built along a line (bridges, walls).
+ *
+ * Returns a true unit direction and its perpendicular, plus a step count fine
+ * enough that a diagonal span stays gap-free. Snapping the perpendicular to an
+ * axis — the obvious shortcut — turns a 45° bridge into disconnected strips,
+ * so we keep it continuous and let the sink deduplicate overlapping writes.
+ */
+function spanBasis(from: Vec3, to: Vec3): {
+  dirX: number;
+  dirZ: number;
+  perpX: number;
+  perpZ: number;
+  distance: number;
+  steps: number;
+} | null {
+  const dx = to.x - from.x;
+  const dz = to.z - from.z;
+  const distance = Math.hypot(dx, dz);
+  if (distance < 1e-6) return null;
+  const dirX = dx / distance;
+  const dirZ = dz / distance;
+  return {
+    dirX,
+    dirZ,
+    // Left-hand normal in the XZ plane.
+    perpX: -dirZ,
+    perpZ: dirX,
+    distance,
+    // Half-block sampling guarantees adjacency even on the worst-case diagonal.
+    steps: Math.max(1, Math.ceil(distance * 2)),
+  };
+}
+
 export function buildBridge(
   sink: BlockSink,
   from: Vec3,
@@ -405,34 +439,40 @@ export function buildBridge(
   const deck = id(style.floor);
   const rail = id(style.wall);
   const support = id(style.trim);
+
+  const basis = spanBasis(from, to);
+  if (!basis) return 0;
+  const { perpX, perpZ, distance, steps } = basis;
+  const hw = Math.floor(width / 2);
+  const archHeight = Math.min(6, distance * 0.12);
   let n = 0;
 
-  const dx = to.x - from.x;
-  const dz = to.z - from.z;
-  const length = Math.max(Math.abs(dx), Math.abs(dz));
-  if (length === 0) return 0;
-  const hw = Math.floor(width / 2);
+  // Piers are spaced by real distance, not by loop index, so spacing is
+  // consistent regardless of the span's angle.
+  let nextPier = 8;
 
-  for (let t = 0; t <= length; t++) {
-    const p = t / length;
-    const x = Math.round(from.x + dx * p);
-    const z = Math.round(from.z + dz * p);
-    const lift = arch ? Math.round(Math.sin(p * Math.PI) * Math.min(6, length * 0.12)) : 0;
+  for (let t = 0; t <= steps; t++) {
+    const p = t / steps;
+    const travelled = p * distance;
+    const cx = from.x + (to.x - from.x) * p;
+    const cz = from.z + (to.z - from.z) * p;
+    const lift = arch ? Math.round(Math.sin(p * Math.PI) * archHeight) : 0;
     const y = Math.round(from.y + (to.y - from.y) * p) + lift;
 
     for (let w = -hw; w <= hw; w++) {
-      const px = x + (Math.abs(dx) >= Math.abs(dz) ? 0 : w);
-      const pz = z + (Math.abs(dx) >= Math.abs(dz) ? w : 0);
+      const px = Math.round(cx + perpX * w);
+      const pz = Math.round(cz + perpZ * w);
       if (sink.set(px, y, pz, deck)) n++;
-      if (Math.abs(w) === hw) {
-        if (sink.set(px, y + 1, pz, rail)) n++;
-      }
+      if (Math.abs(w) === hw && sink.set(px, y + 1, pz, rail)) n++;
     }
-    // Piers every 8 blocks.
-    if (t % 8 === 0 && t > 0 && t < length) {
-      for (let py = y - 1; py > y - 30; py--) {
-        if (sink.get(x, py, z) !== AIR) break;
-        if (sink.set(x, py, z, support)) n++;
+
+    if (travelled >= nextPier && travelled < distance - 4) {
+      nextPier += 8;
+      const px = Math.round(cx);
+      const pz = Math.round(cz);
+      for (let py = y - 1; py > y - 40; py--) {
+        if (sink.get(px, py, pz) !== AIR) break;
+        if (sink.set(px, py, pz, support)) n++;
       }
     }
   }
@@ -494,28 +534,29 @@ export function buildWallStructure(
   const { height = 8, thickness = 3, style = STYLES.medieval } = options;
   const wall = id(style.wall);
   const floorId = id(style.floor);
-  let n = 0;
-  const points = line({ set: () => false, get: () => 0 } as BlockSink, from, to, 0) === 0 ? [] : [];
-  void points;
 
-  const dx = to.x - from.x;
-  const dz = to.z - from.z;
-  const length = Math.max(Math.abs(dx), Math.abs(dz));
+  const basis = spanBasis(from, to);
+  if (!basis) return 0;
+  const { perpX, perpZ, distance, steps } = basis;
   const hw = Math.floor(thickness / 2);
+  let n = 0;
 
-  for (let t = 0; t <= length; t++) {
-    const p = t / Math.max(1, length);
-    const x = Math.round(from.x + dx * p);
-    const z = Math.round(from.z + dz * p);
-    const ground = world.surfaceAt(x, z);
+  for (let t = 0; t <= steps; t++) {
+    const p = t / steps;
+    const cx = from.x + (to.x - from.x) * p;
+    const cz = from.z + (to.z - from.z) * p;
+
     for (let w = -hw; w <= hw; w++) {
-      const px = Math.abs(dx) >= Math.abs(dz) ? x : x + w;
-      const pz = Math.abs(dx) >= Math.abs(dz) ? z + w : z;
+      const px = Math.round(cx + perpX * w);
+      const pz = Math.round(cz + perpZ * w);
+      // Follow the terrain so the wall never floats or buries itself.
+      const ground = world.surfaceAt(px, pz);
+      if (ground < world.bounds.minY) continue;
       for (let y = ground; y <= ground + height; y++) {
-        const block = y === ground + height ? floorId : wall;
-        if (sink.set(px, y, pz, block)) n++;
+        if (sink.set(px, y, pz, y === ground + height ? floorId : wall)) n++;
       }
-      if (Math.abs(w) === hw && t % 2 === 0) {
+      // Crenellations along both rims, spaced in world distance.
+      if (Math.abs(w) === hw && Math.round(p * distance) % 2 === 0) {
         if (sink.set(px, ground + height + 1, pz, wall)) n++;
       }
     }

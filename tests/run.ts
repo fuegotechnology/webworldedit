@@ -190,6 +190,93 @@ async function main() {
   ok(structures.buildVillage(s3, w3, vec3(-40, 65, -40), { houses: 4, radius: 30, seed: 5 }) > 1000, 'village places houses and paths');
   ok(structures.buildTower(s3, vec3(200, 65, 200), { radius: 4, height: 20 }) > 400, 'tower builds a crenellated shaft');
 
+  // Spans must stay gap-free at any angle — the naive axis-snapped
+  // perpendicular used to shred diagonals into disconnected strips.
+  const deckId = blockRegistry.resolve(structures.STYLES.medieval.floor)!.id;
+  const railId = blockRegistry.resolve(structures.STYLES.medieval.wall)!.id;
+  const isDeck = (wb: InstanceType<typeof World>, x: number, y: number, z: number) => {
+    const v = wb.getBlock(x, y, z);
+    return v === deckId || v === railId;
+  };
+  /** Largest gap along the span's centreline, in blocks. */
+  const centrelineGaps = (wb: InstanceType<typeof World>, a: typeof vec3 extends never ? never : ReturnType<typeof vec3>, bpt: ReturnType<typeof vec3>) => {
+    const dist = Math.hypot(bpt.x - a.x, bpt.z - a.z);
+    let gaps = 0;
+    for (let s = 0; s <= Math.ceil(dist); s++) {
+      const p = s / Math.ceil(dist);
+      const x = Math.round(a.x + (bpt.x - a.x) * p);
+      const z = Math.round(a.z + (bpt.z - a.z) * p);
+      // Bridges arch, so scan the column rather than a single y.
+      let found = false;
+      for (let y = a.y - 2; y <= a.y + 12 && !found; y++) if (isDeck(wb, x, y, z)) found = true;
+      if (!found) gaps++;
+    }
+    return gaps;
+  };
+
+  for (const [label, target] of [
+    ['axis-aligned +X', vec3(60, 70, 0)],
+    ['diagonal 45°', vec3(45, 70, 45)],
+    ['shallow diagonal', vec3(60, 70, 18)],
+    ['negative diagonal', vec3(-40, 70, -40)],
+  ] as const) {
+    const wb = new World();
+    const sb = new WorldSink(wb);
+    const start = vec3(0, 70, 0);
+    const wrote = structures.buildBridge(sb, start, target, { width: 5, arch: false });
+    wb.flush();
+    const gaps = centrelineGaps(wb, start, target);
+    ok(wrote > 0 && gaps === 0, `bridge ${label} is continuous (${wrote} blocks, ${gaps} gaps)`);
+  }
+
+  /**
+   * Measures the deck's true walkable width *perpendicular to travel*.
+   * This is the assertion that actually pins the diagonal bug: an
+   * axis-snapped perpendicular yields ~2.5 blocks on a 45° span even though
+   * the total block count still looks plausible.
+   */
+  const perpendicularWidth = (
+    wb: InstanceType<typeof World>,
+    a: ReturnType<typeof vec3>,
+    bpt: ReturnType<typeof vec3>,
+  ): number => {
+    const ddx = bpt.x - a.x;
+    const ddz = bpt.z - a.z;
+    const dist = Math.hypot(ddx, ddz);
+    const px = -(ddz / dist);
+    const pz = ddx / dist;
+    let worst = Infinity;
+    for (let s = Math.round(dist * 0.25); s <= Math.round(dist * 0.75); s++) {
+      const p = s / dist;
+      const cx = a.x + ddx * p;
+      const cz = a.z + ddz * p;
+      let count = 0;
+      for (let k = -6; k <= 6; k += 0.5) {
+        if (wb.getBlock(Math.round(cx + px * k), a.y, Math.round(cz + pz * k)) !== 0) count++;
+      }
+      worst = Math.min(worst, count * 0.5);
+    }
+    return worst;
+  };
+
+  for (const [label, target] of [
+    ['axis-aligned', vec3(60, 70, 0)],
+    ['45° diagonal', vec3(45, 70, 45)],
+    ['shallow diagonal', vec3(60, 70, 18)],
+  ] as const) {
+    const wb = new World();
+    structures.buildBridge(new WorldSink(wb), vec3(0, 70, 0), target, { width: 5, arch: false });
+    wb.flush();
+    const measured = perpendicularWidth(wb, vec3(0, 70, 0), target);
+    ok(measured >= 4, `bridge ${label} keeps its 5-block deck width (measured ${measured.toFixed(1)})`);
+  }
+
+  const wwall = new World();
+  const swall = new WorldSink(wwall);
+  gen.generateTerrain(swall, normalizeRegion(vec3(-50, 0, -50), vec3(50, 90, 50)), { seed: 4, baseHeight: 64, amplitude: 2 });
+  wwall.flush();
+  ok(structures.buildWallStructure(swall, wwall, vec3(-30, 65, -30), vec3(30, 65, 30), { height: 6 }) > 500, 'diagonal wall follows terrain and builds');
+
   // ------------------------------------------------------------ AI parser
   group('AI prompt compiler');
   const cases: Array<[string, string]> = [
