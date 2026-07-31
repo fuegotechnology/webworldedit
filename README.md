@@ -28,6 +28,7 @@ block registry's palette so nothing is blocked on a download.
 npm run build       # typecheck + production bundle into dist/
 npm run preview     # serve the production build
 npm run typecheck   # tsc --noEmit
+npm run test:all    # 143 checks (logic + render path)
 ```
 
 ### Fetching Minecraft textures
@@ -224,16 +225,47 @@ Tunables live in Properties → World (view distance, move speed) and `ChunkRend
 
 ## Testing
 
-The renderer needs a real GPU, but every headless-testable layer is verified:
+```bash
+npm test          # 97 logic checks
+npm run test:render   # 46 render-path checks
+npm run test:all      # both
+```
 
-- **Core/ops** — fill, brush, replace, line, clipboard rotate×4 identity, batch/undo
-- **Mesher** — single block → 6 quads / 36 indices; full 16³ chunk → 6 quads (greedy merge); interior culling
-- **Generators & structures** — terrain, forest, mountain, river, castle, house, village
-- **AI parser** — all 10 documented example prompts compile to the right operations; garbage input
-  yields an empty plan with confidence 0
+**Logic suite (97 checks)**
+
+- **Core/ops** — fill, brush, replace, line, flood fill, clipboard rotate×4 and mirror×2 identities
+- **Chunk memory** — lazy allocation on first write, array freed when a section empties
+- **Undo journal** — delta capture, undo/redo, nested transactions collapsing to one entry
+- **Mesher** — single block → 6 quads / 36 indices; solid 16³ chunk → 6 quads (greedy merge);
+  interior culling; neighbour-padding face culling; translucent-pass routing
+- **Generators & structures** — terrain, forest, mountain, river, castle, house, village, tower;
+  bridges and walls verified gap-free *and* full-width across four span angles
+- **AI** — all 10 documented example prompts compile to the right operations; size adjectives scale
+  output; garbage input yields an empty plan at confidence 0; remote-plan validation rejects unknown
+  operations and strips non-finite numbers
 - **IO** — NBT round-trip (all tag types incl. bigint & UTF-8), `.schem` round-trip block-for-block,
-  chunk RLE round-trip
-- **UI** — atlas fallback, palette rendering/search/filter, DOM helpers, history, project round-trip
+  chunk palette+RLE round-trip, project JSON round-trip
+- **UI** — atlas fallback, palette rendering/search/filter, DOM helpers, selection semantics
+
+**Render suite (46 checks)**
+
+A GPU isn't available in CI, so this covers everything up to the driver call:
+
+- Mesher output loaded into real `THREE.BufferGeometry` — attribute/index count consistency,
+  no out-of-range indices, no NaN, all geometry inside chunk bounds
+- The `ChunkRenderer`'s hand-assigned bounding sphere proven to contain every emitted vertex
+- Frustum culling checked with real `THREE.Frustum` math (in front / behind / off-axis / beyond far)
+- The voxel material's `onBeforeCompile` executed against the **genuine Lambert shader source from the
+  installed three version**, asserting every varying declared in the vertex stage is consumed in the
+  fragment stage and that the injected GLSL is balanced
+
+That last group guards the one failure mode that presents as a silent black screen: the shader patch
+anchors on upstream `#include` tokens, so a `three` upgrade could break rendering without any type or
+build error. Verified by fault injection — corrupting the `map_fragment` anchor fails the suite.
+
+**Not covered:** actual GPU rasterisation (no browser in this environment) and the live Mojang
+download in `npm run assets` (the extract/pack logic is tested against a synthetic jar; the network
+call itself is not).
 
 ## License
 
